@@ -1,0 +1,667 @@
+---
+title: "Mid_Term : Case Study"
+author: "Aditya Gude"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE} 
+
+# You do not need this. This is just to supress warnings on the PDF
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+###  Packages
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(caret)
+library(rpart)
+library(Metrics)
+library(randomForest)
+library(naivebayes)
+library(DescTools)
+library(mice)
+library(e1071)
+library(dplyr)
+library(corrplot)
+library(reshape2)
+library(melt)
+
+```
+
+###  Filling missing values
+
+```{r}
+# Load data
+websites <- read.csv("websites_labelled.csv")
+
+# Check for missing values
+colSums(is.na(websites))
+
+# Impute missing values with mode
+mode_location <- names(sort(-table(websites$server_loc)))[1]
+websites$server_loc[is.na(websites$server_loc)] <- mode_location
+
+# Check for missing values again
+colSums(is.na(websites))
+```
+
+# Exploratory Data Analaysis Charts
+
+```{r}
+
+# Bar chart for registered_domain
+ggplot(websites, aes(x = registered_domain)) +
+       geom_bar(fill = "steelblue") +
+       labs(x = "Registered Domain", y = "Count") +
+       theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Bar chart for https
+ggplot(websites, aes(x = https)) +
+       geom_bar(fill = "steelblue") +
+       labs(x = "HTTPS", y = "Count")
+
+# Bar chart for server_loc
+ggplot(websites %>% 
+       group_by(server_loc) %>%
+       summarise(count = n()),
+       aes(x = server_loc, y = count)) +
+       geom_bar(stat = "identity", fill = "steelblue") +
+       labs(x = "Server Location", y = "Count") +
+       theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Bar chart for most_visitors_loc
+ggplot(websites %>% 
+       group_by(most_visitors_loc) %>%
+       summarise(count = n()),
+       aes(x = most_visitors_loc, y = count)) +
+       geom_bar(stat = "identity", fill = "steelblue") +
+       labs(x = "Most Visitors Location", y = "Count") +
+       theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Bar chart for label
+ggplot(websites, aes(x = label)) +
+       geom_bar(fill = "steelblue") +
+       labs(x = "Label", y = "Count")
+
+# Compute correlation matrix
+corr_matrix <- cor(websites[, c("url_len", "js_len", "js_obf_len", 
+                                "website_exist_time", "unique_users_day")])
+
+# Reshape data for plotting
+corr_df <- melt(corr_matrix)
+
+# Create correlation heatmap
+ggplot(corr_df, aes(Var1, Var2, fill = value)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+                       theme_bw() + 
+                       theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+                       labs(x = "", y = "", title = "Correlation Heatmap")
+
+
+```
+
+# One hot encoding 
+
+```{r}
+# Select the columns to one-hot encode
+columns_to_encode <- c("registered_domain", "https","server_loc", 
+                       "most_visitors_loc")
+
+# Create a dummy variable transformation object for the selected columns
+dummy_transform <- dummyVars(formula = as.formula(paste0("~", paste(
+                            columns_to_encode, collapse="+"))), 
+                            data = websites, sep = "_")
+
+# Apply the transformation to the training data
+websites_onehot <- predict(dummy_transform, newdata = websites)
+
+# Bind the one hot encoded columns to the original dataset
+websites <- cbind(websites, websites_onehot)
+
+# Delete the original columns
+websites <- websites[, setdiff(names(websites), columns_to_encode)]
+
+```
+
+# Frequency  encoding and label encoding
+
+```{r}
+# Frequency encoding for website_domain
+websites <- websites %>%
+            group_by(website_domain) %>%
+            mutate(website_domain_freq = n()) %>%
+            ungroup() %>%
+            select(-website_domain) %>%
+            rename(website_domain = website_domain_freq)
+
+# Label encoding for label
+websites$label <- as.integer(factor(websites$label, levels = c("bad", "good")))
+websites$label <- websites$label - 1
+```
+
+# New data set with additional features
+
+```{r}
+# Create new dataset with original columns and new features
+new_websites <- websites %>%
+                mutate(total_unique_users = 
+                         unique_users_day * website_exist_time,
+                       js_total_len = js_obf_len + js_len)
+
+
+```
+
+# splitting the data set and new data set into training and testing sets
+
+```{r}
+set.seed(123)
+
+# get indexes from 1 to the number of rows
+indx <- sample(nrow(websites) ,nrow(websites) * 0.70)
+
+# select the data with the indexes sampled
+websites.train.df <- websites[indx, ]
+
+# select the data with the indexes not sampled
+websites.test.df <- websites[-indx, ]
+
+set.seed(123)
+
+# get indexes from 1 to the number of rows
+indx <- sample(nrow(new_websites) ,nrow(new_websites) * 0.70)
+
+# select the data with the indexes sampled
+new_websites.train.df <- new_websites[indx, ]
+
+# select the data with the indexes not sampled
+new_websites.test.df <- new_websites[-indx, ]
+```
+
+# Method 1: Naive bayes on original data
+
+```{r}
+
+# Fit a naive Bayes classifier on the training set
+nb.model.original <- naiveBayes(label ~ ., 
+                                data = websites.train.df)
+
+# Make predictions on the test set
+nb.original.pred <- predict(nb.model.original, 
+                            newdata = websites.test.df)
+
+# Print the confusion matrix
+table(websites.test.df$label, nb.original.pred)
+
+# Compute the confusion matrix
+conf_mat_original <- table(websites.test.df$label, nb.original.pred)
+
+# Compute accuracy
+accuracy_nb_original <- sum(diag(conf_mat_original)) / sum(conf_mat_original)
+cat("Accuracy:", round(accuracy_nb_original, 3), "\n")
+
+# Compute recall
+recall_nb_original <- conf_mat_original[2, 2] / sum(conf_mat_original[2, ])
+cat("Recall:", round(recall_nb_original, 3), "\n")
+
+# Compute precision
+precision_nb_original <- conf_mat_original[2, 2] / sum(conf_mat_original[, 2])
+cat("Precision:", round(precision_nb_original, 3), "\n")
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_original <- conf_mat_original[1, 2] / sum(conf_mat_original[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_original, 3), "\n")
+```
+
+# Method 2: Naive bayes on feature added data
+
+```{r}
+# Fit a naive Bayes classifier on the training set
+nb.model.modified <- naiveBayes(label ~ ., 
+                                data = new_websites.train.df)
+
+# Make predictions on the test set
+nb.modified.pred <- predict(nb.model.modified, 
+                            newdata = new_websites.test.df)
+
+# Print the confusion matrix
+table(new_websites.test.df$label, nb.modified.pred)
+
+# Compute the confusion matrix
+conf_mat_modified <- table(new_websites.test.df$label, nb.modified.pred)
+
+# Compute accuracy
+accuracy_nb_modified <- sum(diag(conf_mat_modified)) / sum(conf_mat_modified)
+cat("Accuracy:", round(accuracy_nb_modified, 3), "\n")
+
+# Compute recall
+recall_nb_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[2, ])
+cat("Recall:", round(recall_nb_modified, 3), "\n")
+
+# Compute precision
+precision_nb_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[, 2])
+cat("Precision:", round(precision_nb_modified, 3), "\n")
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_modified <- conf_mat_modified[1, 2] / sum(conf_mat_modified[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_modified, 3), "\n")
+
+```
+
+# Method 3: Upsample the minority class for original data set
+
+```{r}
+# Upsample the minority class
+websites.train.df$label <- factor(websites.train.df$label)
+
+train.over <- upSample(x = websites.train.df %>% select(-label),
+                       y = websites.train.df$label , 
+                       list = FALSE,
+                       yname = "label")
+train.over <- as.data.frame(train.over)
+
+# Fit a naive Bayes classifier on the training set
+nb.model.over <- naiveBayes(label ~ ., 
+                            data = train.over)
+
+# Make predictions on the test set
+nb.over.pred <- predict(nb.model.over, 
+                        newdata = websites.test.df)
+
+# Print the confusion matrix
+conf_mat_over <- table(websites.test.df$label, nb.over.pred)
+print(conf_mat_over)
+
+# Compute accuracy
+accuracy_nb_over <- sum(diag(conf_mat_over)) / sum(conf_mat_over)
+cat("Accuracy:", round(accuracy_nb_over, 3), "\n")
+
+# Compute recall
+recall_nb_over <- conf_mat_over[2, 2] / sum(conf_mat_over[2, ])
+cat("Recall:", round(recall_nb_over, 3), "\n")
+
+# Compute precision
+precision_nb_over <- conf_mat_over[2, 2] / sum(conf_mat_over[, 2])
+cat("Precision:", round(precision_nb_over, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_over <- conf_mat_over[1, 2] / sum(conf_mat_over[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_over, 3), "\n")
+
+```
+
+# Method 4: Down sampling the majority class for original dataset
+
+```{r}
+# downsample the majority class
+websites.train.df$label <- factor(websites.train.df$label)
+
+train.down <- downSample(x = websites.train.df %>% select(-label),
+                         y = websites.train.df$label , 
+                         list = FALSE, 
+                         yname = "label")
+train.down <- as.data.frame(train.down)
+
+# Fit a naive Bayes classifier on the training set
+nb.model.down <- naiveBayes(label ~ ., 
+                            data = train.down)
+
+# Make predictions on the test set
+nb.down.pred <- predict(nb.model.down, 
+                        newdata = websites.test.df)
+
+# Print the confusion matrix
+conf_mat_down <- table(websites.test.df$label, nb.down.pred)
+print(conf_mat_down)
+
+# Compute accuracy
+accuracy_nb_down <- sum(diag(conf_mat_down)) / sum(conf_mat_down)
+cat("Accuracy:", round(accuracy_nb_down, 3), "\n")
+
+# Compute recall
+recall_nb_down <- conf_mat_down[2, 2] / sum(conf_mat_down[2, ])
+cat("Recall:", round(recall_nb_down, 3), "\n")
+
+
+# Compute precision
+precision_nb_down <- conf_mat_down[2, 2] / sum(conf_mat_down[, 2])
+cat("Precision:", round(precision_nb_down, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_down <- conf_mat_down[1, 2] / sum(conf_mat_down[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_down, 3), "\n")
+
+```
+
+# Method 5: Upsample the minority class for new data set
+
+```{r}
+# Upsample the minority class
+new_websites.train.df$label <- factor(new_websites.train.df$label)
+
+train.over.new <- upSample(x = new_websites.train.df %>% select(-label),
+                           y = new_websites.train.df$label , 
+                           list = FALSE,
+                           yname = "label")
+train.over.new <- as.data.frame(train.over.new)
+
+# Fit a naive Bayes classifier on the training set
+nb.model.over.new <- naiveBayes(label ~ ., 
+                                data = train.over.new)
+
+# Make predictions on the test set
+nb.over.pred.new <- predict(nb.model.over.new, 
+                            newdata = new_websites.test.df)
+
+# Print the confusion matrix
+conf_mat_over_new <- table(new_websites.test.df$label, nb.over.pred.new)
+print(conf_mat_over_new)
+
+# Compute accuracy
+accuracy_nb_over_new <- sum(diag(conf_mat_over_new)) / sum(conf_mat_over_new)
+cat("Accuracy:", round(accuracy_nb_over_new, 3), "\n")
+
+# Compute recall
+recall_nb_over_new <- conf_mat_over_new[2, 2] / sum(conf_mat_over_new[2, ])
+cat("Recall:", round(recall_nb_over_new, 3), "\n")
+
+
+# Compute precision
+precision_nb_over_new <- conf_mat_over_new[2, 2] / sum(conf_mat_over_new[, 2])
+cat("Precision:", round(precision_nb_over_new, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_over <- conf_mat_over[1, 2] / sum(conf_mat_over[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_over, 3), "\n")
+
+```
+
+# Method 6: Down sampling the majority class for new dataset
+
+```{r}
+# downsample the majority class
+new_websites.train.df$label <- factor(new_websites.train.df$label)
+
+train.down.new <- downSample(x = new_websites.train.df %>% select(-label),
+                             y = new_websites.train.df$label , 
+                             list = FALSE, 
+                             yname = "label")
+train.down.new <- as.data.frame(train.down.new)
+
+# Fit a naive Bayes classifier on the training set
+nb.model.down.new <- naiveBayes(label ~ ., 
+                                data = train.down.new)
+
+# Make predictions on the test set
+nb.down.pred.new <- predict(nb.model.down.new, 
+                            newdata = new_websites.test.df)
+
+# Print the confusion matrix
+conf_mat_down_new <- table(new_websites.test.df$label, nb.down.pred.new)
+print(conf_mat_down_new)
+
+# Compute accuracy
+accuracy_nb_down_new <- sum(diag(conf_mat_down_new)) / sum(conf_mat_down_new)
+cat("Accuracy:", round(accuracy_nb_down_new, 3), "\n")
+
+# Compute recall
+recall_nb_down_new <- conf_mat_down_new[2, 2] / sum(conf_mat_down_new[2, ])
+cat("Recall:", round(recall_nb_down_new, 3), "\n")
+
+
+# Compute precision
+precision_nb_down_new <- conf_mat_down_new[2, 2] / sum(conf_mat_down_new[, 2])
+cat("Precision:", round(precision_nb_down_new, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_nb_down <- conf_mat_down[1, 2] / sum(conf_mat_down[1, ])
+cat("False Positive Rate (FPR):", round(fpr_nb_down, 3), "\n")
+
+```
+
+# Method 7: Decison tree on original data
+
+```{r}
+websites.test.df.descTree <- websites.test.df[,-3]
+websites.train.descTree <- websites.train.df[,-3]
+# Train a decision tree on the original data
+tree.original <- rpart(label ~ ., 
+                       data = websites.train.descTree, 
+                       method = "class")
+
+# Make predictions on the test set
+tree.original.pred <- predict(tree.original, 
+                              newdata = websites.test.df.descTree, 
+                              type = "class")
+
+# Print the confusion matrix
+table(websites.test.df.descTree$label, tree.original.pred)
+
+# Compute the confusion matrix
+conf_mat_original <- table(websites.test.df.descTree$label, tree.original.pred)
+
+# Compute accuracy
+accuracy_tree_original <- sum(diag(conf_mat_original)) / sum(conf_mat_original)
+cat("Accuracy:", round(accuracy_tree_original, 3), "\n")
+
+# Compute recall
+recall_tree_original <- conf_mat_original[2, 2] / sum(conf_mat_original[2, ])
+cat("Recall:", round(recall_tree_original, 3), "\n")
+
+
+# Compute precision
+precision_tree_original <- conf_mat_original[2, 2] / sum(conf_mat_original[, 2])
+cat("Precision:", round(precision_tree_original, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_tree_original <- conf_mat_original[1, 2] / sum(conf_mat_original[1, ])
+cat("False Positive Rate (FPR):", round(fpr_tree_original, 3), "\n")
+
+
+```
+
+# Method 8: Decision tree on feature added data
+
+```{r}
+new_websites.test.df.descTree <- new_websites.test.df[,-3]
+new_websites.train.df.descTree <- new_websites.train.df[,-3]
+
+# Train a decision tree on the modified data
+tree.modified <- rpart(label ~ ., 
+                       data = new_websites.train.df.descTree, 
+                       method = "class")
+
+# Make predictions on the test set
+tree.modified.pred <- predict(tree.modified, 
+                              newdata = new_websites.test.df.descTree, 
+                              type = "class")
+
+# Print the confusion matrix
+table(new_websites.test.df.descTree$label, tree.modified.pred)
+
+# Compute the confusion matrix
+conf_mat_modified <- table(new_websites.test.df.descTree$label, 
+                           tree.modified.pred)
+
+# Compute accuracy
+accuracy_tree_modified <- sum(diag(conf_mat_modified)) / sum(conf_mat_modified)
+cat("Accuracy:", round(accuracy_tree_modified, 3), "\n")
+
+# Compute recall
+recall_tree_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[2, ])
+cat("Recall:", round(recall_tree_modified, 3), "\n")
+
+
+# Compute precision
+precision_tree_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[, 2])
+cat("Precision:", round(precision_tree_modified, 3), "\n")
+
+# Calculate the False Positive Rate (FPR)
+fpr_tree_modified <- conf_mat_modified[1, 2] / sum(conf_mat_modified[1, ])
+cat("False Positive Rate (FPR):", round(fpr_tree_modified, 3), "\n")
+
+
+```
+
+# Method 9: Random forest on original data
+
+```{r}
+
+# Fit a random forest classifier on the training set
+rf.model.original <- randomForest(label ~ ., 
+                                  data = websites.train.df)
+
+# Make predictions on the test set
+rf.original.pred <- predict(rf.model.original, 
+                            newdata = websites.test.df)
+
+# Print the confusion matrix
+table(websites.test.df$label, rf.original.pred)
+
+# Compute the confusion matrix
+conf_mat_original <- table(websites.test.df$label, rf.original.pred)
+
+# Compute accuracy
+accuracy_rf_original <- sum(diag(conf_mat_original)) / sum(conf_mat_original)
+cat("Accuracy:", round(accuracy_rf_original, 3), "\n")
+
+# Compute recall
+recall_rf_original <- conf_mat_original[2, 2] / sum(conf_mat_original[2, ])
+cat("Recall:", round(recall_rf_original, 3), "\n")
+
+# Compute precision
+precision_rf_original <- conf_mat_original[2, 2] / sum(conf_mat_original[, 2])
+cat("Precision:", round(precision_rf_original, 3), "\n")
+
+# Calculate the False Positive Rate (FPR)
+fpr_rf_original <- conf_mat_original[1, 2] / sum(conf_mat_original[1, ])
+cat("False Positive Rate (FPR):", round(fpr_rf_original, 3), "\n")
+
+
+```
+
+# Method 10:Random forest on featured data
+
+```{r}
+# Fit a random forest classifier on the training set
+rf.model.modified <- randomForest(label ~ ., 
+                                  data = new_websites.train.df)
+
+# Make predictions on the test set
+rf.modified.pred <- predict(rf.model.modified, 
+                            newdata = new_websites.test.df)
+
+# Print the confusion matrix
+table(new_websites.test.df$label, rf.modified.pred)
+
+# Compute the confusion matrix
+conf_mat_modified <- table(new_websites.test.df$label, rf.modified.pred)
+
+# Compute accuracy
+accuracy_rf_modified <- sum(diag(conf_mat_modified)) / sum(conf_mat_modified)
+cat("Accuracy:", round(accuracy_rf_modified, 3), "\n")
+
+# Compute recall
+recall_rf_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[2, ])
+cat("Recall:", round(recall_rf_modified, 3), "\n")
+
+# Compute precision
+precision_rf_modified <- conf_mat_modified[2, 2] / sum(conf_mat_modified[, 2])
+cat("Precision:", round(precision_rf_modified, 3), "\n")
+
+
+# Calculate the False Positive Rate (FPR)
+fpr_rf_modified<- conf_mat_modified[1, 2] / sum(conf_mat_modified[1, ])
+cat("False Positive Rate (FPR):", round(fpr_rf_modified, 3), "\n")
+
+```
+```{r}
+#Saving our final model
+saveRDS(nb.model.over.new, "./nb.model.over.new.rds")
+
+```
+
+# Predictiong our final model on the unlabelled dataset
+
+```{r}
+# prediction on unlabeled data
+
+# Load the trained random forest model
+nb.model.over.new.rds <- readRDS("nb.model.over.new.rds")
+
+# Load the unlabelled dataset
+websites_unlabelled <- read.csv("websites_unlabelled.csv", 
+                                stringsAsFactors = TRUE)
+websites_unlabelled$label <- 0
+websites_unlabelled.df <- websites_unlabelled
+
+# Check for missing values
+colSums(is.na(websites_unlabelled.df))
+
+# Impute missing values with mode
+mode_location <- names(sort(-table(websites_unlabelled.df$server_loc)))[1]
+websites_unlabelled.df$server_loc[is.na(websites_unlabelled.df$server_loc)] <- mode_location
+
+
+# Select the columns to one-hot encode
+columns_to_encode <- c("registered_domain", "https","server_loc", 
+                       "most_visitors_loc")
+
+# Create a dummy variable transformation object for the selected columns
+dummy_transform <- dummyVars(formula = as.formula(paste0("~", paste(
+                             columns_to_encode, collapse="+"))), 
+                             data = websites_unlabelled.df, sep = "")
+
+# Apply the transformation to the training data
+websites_onehot <- predict(dummy_transform, newdata = websites_unlabelled.df)
+
+# Bind the one hot encoded columns to the original dataset
+websites_unlabelled.df <- cbind(websites_unlabelled.df, websites_onehot)
+
+# Delete the original columns
+websites_unlabelled.df <- 
+  websites_unlabelled.df[, setdiff(names(websites_unlabelled.df), 
+                                   columns_to_encode)]
+
+
+# Frequency encoding for website_domain
+websites_unlabelled.df <- websites_unlabelled.df %>%
+                          group_by(website_domain) %>%
+                          mutate(website_domain_freq = n()) %>%
+                          ungroup() %>%
+                          select(-website_domain) %>%
+                          rename(website_domain = website_domain_freq)
+
+# New data set with additional features
+# Create new dataset with original columns and new features
+websites_unlabelled.df <- websites_unlabelled.df %>%
+                          mutate(total_unique_users = 
+                                   unique_users_day * website_exist_time,
+                                 js_total_len = js_obf_len + js_len)
+
+# Create a new column called 'label'
+# websites_unlabelled.df <- websites_unlabelled.df %>%
+# mutate(label = NA)
+
+probabilities <- predict(nb.model.over.new.rds, 
+                         newdata = websites_unlabelled.df, 
+                         type = "class")
+labels <- ifelse(probabilities == "1", "good", "bad")
+websites_unlabelled$label <- labels
+
+# Write the labeled dataset to a CSV file
+write.csv(websites_unlabelled, "C:/Users/Library Patron/Desktop/websites_labeled.csv", row.names = FALSE)
+
+
+```
+
+```
